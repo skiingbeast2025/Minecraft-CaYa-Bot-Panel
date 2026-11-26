@@ -12,7 +12,7 @@ import { AUTH_ERRORS, type AuthErrorCode } from "../modules/auth/messages";
 import { RuleEngine } from "../modules/automation/RuleEngine";
 import { WorldMemory } from "../modules/world/memory";
 import { loadJson, saveJson } from "../persistence/store";
-import type { BotAuthType, BotConfig, ServerProfile, StateSnapshot, Waypoint } from "../types";
+import type { BotAuthType, BotConfig, ProxyProfile, ServerProfile, StateSnapshot, Waypoint } from "../types";
 import { USERNAME_RE, defaultBotConfig, mergeConfig, newId } from "../types";
 import { createLogger } from "../utils/logger";
 import { BotInstance } from "./BotInstance";
@@ -25,6 +25,8 @@ export { PanelError };
 const BOTS_FILE = "bots.json";
 const SERVERS_FILE = "servers.json";
 const BULK_START_STAGGER_MS = 2_000; // stagger bulk starts to avoid flooding the server (Faz 2)
+const SAME_IP_MIN_GAP_MS = 5_500;
+const PROXY_FAIL_COOLDOWN_MS = 5 * 60_000;
 
 export interface CreateBotInput {
   username: string;
@@ -47,6 +49,8 @@ export class BotManager extends EventEmitter {
   readonly rules = new RuleEngine(this);
   servers: ServerProfile[] = [];
   private readonly log = createLogger("manager");
+  private readonly proxyCooldownUntil = new Map<string, number>();
+  private readonly lastConnectAtByIp = new Map<string, number>();
 
   boot() {
     this.waypoints.load();
@@ -339,6 +343,81 @@ export class BotManager extends EventEmitter {
     inst.resetAllWork(reason);
   }
 
+  /** Space out connections sharing the same (server, outbound IP) so shared proxies do not trigger login rate limits. */
+  reserveConnectDelayMs(serverId: string, proxy: ProxyProfile | null): number {
+    const key = `${serverId}::${proxy ? `ip:${proxy.host.trim().toLowerCase()}` : "direct"}`;
+    const now = Date.now();
+    const prev = this.lastConnectAtByIp.get(key) ?? 0;
+    const scheduledAt = Math.max(now, prev + SAME_IP_MIN_GAP_MS);
+    this.lastConnectAtByIp.set(key, scheduledAt);
+    return scheduledAt - now;
+  }
+
+  /** Rotate a bot off a failed proxy, preferring unused proxies before sharing an active one. */
+  rotateProxy(botId: string, failedProxyId: string) {
+    const inst = this.bots.get(botId);
+    if (!inst) return null;
+    const now = Date.now();
+    this.proxyCooldownUntil.set(failedProxyId, now + PROXY_FAIL_COOLDOWN_MS);
+
+    const enabled = this.proxies.list().filter((p) => p.enabled && p.id !== failedProxyId);
+    if (enabled.length === 0) return null;
+
+    const fresh = enabled.filter((p) => (this.proxyCooldownUntil.get(p.id) ?? 0) <= now);
+    const pool = fresh.length > 0 ? fresh : enabled;
+
+    const assignedCounts = new Map<string, number>();
+    const activeCounts = new Map<string, number>();
+    const activeHostCounts = new Map<string, number>();
+
+    for (const other of this.bots.values()) {
+      if (other.config.id === botId) continue;
+      const rawId = other.config.proxyId;
+      if (rawId === "__direct__") continue;
+      const srv = this.getServer(other.config.serverId);
+      const effId = rawId || srv?.proxyId || null;
+      if (!effId) continue;
+      assignedCounts.set(effId, (assignedCounts.get(effId) ?? 0) + 1);
+      if (other.status !== "stopped") {
+        activeCounts.set(effId, (activeCounts.get(effId) ?? 0) + 1);
+        const host = this.proxies.get(effId)?.profile.host.trim().toLowerCase();
+        if (host) activeHostCounts.set(host, (activeHostCounts.get(host) ?? 0) + 1);
+      }
+    }
+
+    const score = (p: ProxyProfile) => {
+      const activeHost = activeHostCounts.get(p.host.trim().toLowerCase()) ?? 0;
+      const active = activeCounts.get(p.id) ?? 0;
+      const assigned = assignedCounts.get(p.id) ?? 0;
+      // Tier 0: completely unused; Tier 1: unused by active bots & distinct host; Tier 2: unused by active bots; Tier 3: shared
+      const tier =
+        assigned === 0 && active === 0 && activeHost === 0
+          ? 0
+          : active === 0 && activeHost === 0
+            ? 1
+            : active === 0
+              ? 2
+              : 3;
+      return [tier, activeHost, active, assigned] as const;
+    };
+
+    const sorted = [...pool].sort((a, b) => {
+      const sa = score(a);
+      const sb = score(b);
+      for (let i = 0; i < sa.length; i++) {
+        if (sa[i]! !== sb[i]!) return sa[i]! - sb[i]!;
+      }
+      return 0;
+    });
+
+    const chosen = sorted[0];
+    if (!chosen) return null;
+    inst.config.proxyId = chosen.id;
+    this.persistBots();
+    this.emit("changed");
+    return this.proxies.get(chosen.id) ?? null;
+  }
+
   /** Group stagger counters by (server, outbound IP) so distinct proxy IPs connect with 0 stagger. */
   private outboundIpKey(inst: BotInstance): string {
     const rawId = inst.config.proxyId;
@@ -582,7 +661,11 @@ export class BotManager extends EventEmitter {
         markJoining: (accountId) => accounts.markJoining(accountId),
         finishPrompt: (accountId, result) => accounts.finishPrompt(accountId, result)
       },
-      (pid) => this.proxies.get(pid)
+      (pid) => this.proxies.get(pid),
+      {
+        rotateProxy: (botId, failedProxyId) => this.rotateProxy(botId, failedProxyId),
+        reserveConnectDelayMs: (serverId, proxy) => this.reserveConnectDelayMs(serverId, proxy)
+      }
     );
     // A viewer belongs to one mineflayer connection; close it when that connection ends.
     inst.on("status", (p: { status?: string }) => {

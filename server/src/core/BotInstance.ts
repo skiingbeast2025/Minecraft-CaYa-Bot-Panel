@@ -139,6 +139,10 @@ export class BotInstance extends EventEmitter {
   /** Fires when the device code shown to the user has expired without a sign-in. */
   private deviceCodeTimer: NodeJS.Timeout | null = null;
   private connectSocketId: string | undefined;
+  private activeProxy: ResolvedProxy | null = null;
+  private proxyRotations = 0;
+  private rotatedThisAttempt = false;
+  private paceTimer: NodeJS.Timeout | null = null;
 
   constructor(
     public config: BotConfig,
@@ -160,7 +164,11 @@ export class BotInstance extends EventEmitter {
       markJoining(accountId: string): void;
       finishPrompt(accountId: string, result: { ok: boolean; errorCode?: string }): void;
     },
-    private readonly getProxy?: (id: string) => ResolvedProxy | null
+    private readonly getProxy?: (id: string) => ResolvedProxy | null,
+    private readonly proxyBridge?: {
+      rotateProxy(botId: string, failedProxyId: string): ResolvedProxy | null;
+      reserveConnectDelayMs(serverId: string, proxy: ProxyProfile | null): number;
+    }
   ) {
     super();
     this.log = createLogger("bot", config.id);
@@ -315,6 +323,8 @@ export class BotInstance extends EventEmitter {
     this.authInteraction = false;
     this.connectSocketId = socketId;
     this.reconnectAttempt = 0;
+    this.proxyRotations = 0;
+    this.rotatedThisAttempt = false;
     this.runtime.kickReason = undefined;
     this.runtime.lastError = undefined;
     this.runtime.errorCode = undefined;
@@ -324,6 +334,10 @@ export class BotInstance extends EventEmitter {
   stop() {
     this.wantsRunning = false;
     this.connectSeq++;
+    if (this.paceTimer) {
+      clearTimeout(this.paceTimer);
+      this.paceTimer = null;
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -1126,9 +1140,11 @@ export class BotInstance extends EventEmitter {
       this.setStatus("error");
       return;
     }
+    this.activeProxy = proxy;
+    this.rotatedThisAttempt = false;
     const mode = normalizeViaProxyMode(server.viaProxy);
     if (mode === "off") {
-      this.openConnection(server, null, proxy);
+      this.schedulePacedOpen(server, null, proxy, this.connectSeq);
       return;
     }
     const attempt = ++this.connectSeq;
@@ -1139,7 +1155,7 @@ export class BotInstance extends EventEmitter {
           route?.lease.release();
           return;
         }
-        this.openConnection(server, route, proxy);
+        this.schedulePacedOpen(server, route, proxy, attempt);
       },
       (err: unknown) => {
         if (attempt !== this.connectSeq || !this.wantsRunning) return;
@@ -1189,6 +1205,66 @@ export class BotInstance extends EventEmitter {
     this.log.info(`Using ViaProxy ${VIAPROXY.version}: ${reason}. The bot joins as ${version}.`);
     const lease = await acquireViaProxy(server.host, server.port);
     return { lease, version };
+  }
+
+  private schedulePacedOpen(server: ServerProfile, route: ViaRoute | null, proxy: ResolvedProxy | null, attempt: number) {
+    if (this.paceTimer) {
+      clearTimeout(this.paceTimer);
+      this.paceTimer = null;
+    }
+    const waitMs = this.proxyBridge?.reserveConnectDelayMs(server.id, proxy?.profile ?? null) ?? 0;
+    if (waitMs <= 0) {
+      this.openConnection(server, route, proxy);
+      return;
+    }
+    this.setStatus("connecting");
+    this.log.info(`Waiting ${Math.ceil(waitMs / 1000)}s before connecting (shared outbound IP rate guard)`);
+    this.paceTimer = setTimeout(() => {
+      this.paceTimer = null;
+      if (attempt !== this.connectSeq || !this.wantsRunning || this.bot) {
+        route?.lease.release();
+        return;
+      }
+      this.openConnection(server, route, proxy);
+    }, waitMs);
+  }
+
+  private tryRotateProxy(reasonMsg: string): boolean {
+    if (
+      !this.wantsRunning ||
+      this.authInteraction ||
+      this.rotatedThisAttempt ||
+      !this.activeProxy ||
+      this.runtime.kickReason ||
+      this.status === "kicked" ||
+      this.proxyRotations >= 15
+    ) {
+      return false;
+    }
+    const isProxyErr =
+      reasonMsg.startsWith("Proxy (") ||
+      (this.spawnedAt === null && /ECONNREFUSED|ETIMEDOUT|timed out|ECONNRESET|EHOSTUNREACH|Connection closed before|socketClosed/i.test(reasonMsg));
+    if (!isProxyErr) return false;
+
+    const next = this.proxyBridge?.rotateProxy(this.config.id, this.activeProxy.profile.id) ?? null;
+    if (!next) return false;
+
+    this.rotatedThisAttempt = true;
+    this.proxyRotations++;
+    this.log.info(
+      `Proxy failed (${reasonMsg}) — switching to ${next.profile.name} (${next.profile.protocol}://${next.profile.host}:${next.profile.port})`
+    );
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const seq = ++this.connectSeq;
+    setTimeout(() => {
+      if (seq !== this.connectSeq || !this.wantsRunning) return;
+      this.teardownBot();
+      this.connect();
+    }, 0);
+    return true;
   }
 
   private openConnection(server: ServerProfile, route: ViaRoute | null, proxy: ResolvedProxy | null) {
@@ -1318,6 +1394,7 @@ export class BotInstance extends EventEmitter {
       this.sendUnpromptedLogin();
       markSessionStart(this.config.id, this.spawnedAt);
       this.startAntiAfk();
+      this.proxyRotations = 0;
       this.authInteraction = false;
       this.runtime.kickReason = undefined;
       this.runtime.lastError = undefined;
@@ -1416,7 +1493,7 @@ export class BotInstance extends EventEmitter {
         return;
       }
       if (this.status !== "kicked") this.setStatus("error");
-      this.scheduleReconnect();
+      if (!this.tryRotateProxy(msg)) this.scheduleReconnect();
     });
 
     bot.on("end", (reason: unknown) => {
@@ -1434,8 +1511,9 @@ export class BotInstance extends EventEmitter {
       this.stopAntiAfk();
       this.teardownBot();
       if (this.devicePromptOpen) this.closeDevicePrompt({ ok: false, errorCode: this.runtime.errorCode ?? "auth.failed" });
+      if (this.rotatedThisAttempt) return;
       if (this.wantsRunning) {
-        this.scheduleReconnect();
+        if (!this.tryRotateProxy(closed)) this.scheduleReconnect();
       } else {
         this.setStatus("stopped");
       }

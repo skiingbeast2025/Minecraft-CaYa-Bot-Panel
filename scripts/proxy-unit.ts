@@ -301,6 +301,20 @@ async function run() {
     const d2 = mgr.createBot({ username: "DirectBot2", serverId: srv.id, proxyId: "__direct__" });
     const directPlan = mgr.planStaggeredStarts([d1.config.id, d2.config.id], 2000);
     assert("direct bots on same server stagger", directPlan[0]?.delayMs === 0 && directPlan[1]?.delayMs === 2000);
+
+    console.log("proxy failover & shared-IP pace guard");
+    const pxUnused = mgr.createProxy({ name: "ProxyUnused", protocol: "socks5", host: "10.10.0.99", port: 1080 });
+    const inUseIds = new Set([pxA.id, pxB.id, pxASameIp.id]);
+    const rotatedUnused = mgr.rotateProxy(b1.config.id, pxA.id);
+    assert("rotateProxy prefers an unused proxy over in-use ones", rotatedUnused !== null && !inUseIds.has(rotatedUnused.profile.id));
+
+    const rotatedShared = mgr.rotateProxy(b1.config.id, pxUnused.id);
+    assert("rotateProxy falls back to sharing another enabled proxy when unused proxies run out", rotatedShared !== null && rotatedShared.profile.id !== pxUnused.id);
+
+    const gap1 = mgr.reserveConnectDelayMs(srv.id, pxA);
+    const gap2 = mgr.reserveConnectDelayMs(srv.id, pxB);
+    const gapSame = mgr.reserveConnectDelayMs(srv.id, pxA);
+    assert("reserveConnectDelayMs gives 0ms for distinct IPs and enforces gap for same IP", gap1 === 0 && gap2 === 0 && gapSame >= 5000);
   } finally {
     await httpProxy.close();
     await socksProxy.close();
