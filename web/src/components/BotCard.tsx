@@ -22,7 +22,10 @@ export function BotCard({
 }) {
   const toast = useAppStore((s) => s.toast);
   const accounts = useAppStore((s) => s.accounts);
+  const proxies = useAppStore((s) => s.proxies);
   const { t, locale } = useI18n();
+  const effectiveProxyId = bot.config.proxyId === "__direct__" ? null : bot.config.proxyId || server?.proxyId || null;
+  const effectiveProxy = effectiveProxyId ? proxies.find((p) => p.id === effectiveProxyId) : null;
   const account = accounts.find((row) => row.id === bot.config.accountId);
   const head = account?.uuid ? `https://mc-heads.net/avatar/${account.uuid}/32` : null;
   const running = bot.status !== "stopped";
@@ -73,6 +76,11 @@ export function BotCard({
           </div>
           <div className="truncate text-xs text-zinc-500">
             {server ? `${server.name} · ${server.host}:${server.port}` : t("botCard.noServer")}
+            {effectiveProxy && (
+              <span className="ml-1.5 rounded bg-indigo-950/70 px-1 py-0.5 text-[10px] text-indigo-300">
+                {effectiveProxy.name}
+              </span>
+            )}
           </div>
         </Link>
         <StatusBadge status={bot.status} />

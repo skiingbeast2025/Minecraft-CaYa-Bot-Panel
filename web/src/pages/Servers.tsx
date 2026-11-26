@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ProxiesPanel } from "../components/ProxiesPanel";
 import { useI18n } from "../i18n/useI18n";
 import { api } from "../lib/api";
 import type { ServerProfile, StateSnapshot } from "../lib/types";
@@ -6,13 +7,14 @@ import { useAppStore } from "../stores/useAppStore";
 
 export function Servers() {
   const servers = useAppStore((s) => s.servers);
+  const proxies = useAppStore((s) => s.proxies);
   const bots = useAppStore((s) => s.bots);
   const supportedVersions = useAppStore((s) => s.supportedVersions);
   const applySnapshot = useAppStore((s) => s.applySnapshot);
   const toast = useAppStore((s) => s.toast);
   const { t } = useI18n();
 
-  const empty = { name: "", host: "", port: "25565", version: "auto", viaProxy: "auto" as "auto" | "always" | "off" };
+  const empty = { name: "", host: "", port: "25565", version: "auto", viaProxy: "auto" as "auto" | "always" | "off", proxyId: "" };
   const [form, setForm] = useState<typeof empty>(empty);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -28,7 +30,7 @@ export function Servers() {
   const submit = async () => {
     if (!formOk || busy) return;
     setBusy(true);
-    const body = { ...form, host: form.host.trim(), name: form.name.trim(), port: portNum };
+    const body = { ...form, host: form.host.trim(), name: form.name.trim(), port: portNum, proxyId: form.proxyId || null };
     try {
       if (editingId) await api.patch(`/api/servers/${editingId}`, body);
       else await api.post("/api/servers", body);
@@ -119,6 +121,21 @@ export function Servers() {
             <option value="off">{t("servers.viaProxyOff")}</option>
           </select>
         </label>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-zinc-400">{t("proxies.serverDefault")}</span>
+          <select
+            value={form.proxyId}
+            onChange={(e) => setForm({ ...form, proxyId: e.target.value })}
+            className="w-48 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-zinc-100 outline-none focus:border-indigo-500"
+          >
+            <option value="">{t("proxies.direct")}</option>
+            {proxies.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.protocol})
+              </option>
+            ))}
+          </select>
+        </label>
         <button
           type="button"
           onClick={() => void submit()}
@@ -177,13 +194,25 @@ export function Servers() {
                   {s.version}
                   {s.viaProxy === "always" && <span className="ml-2 text-xs text-indigo-300">ViaProxy</span>}
                   {s.viaProxy === "off" && <span className="ml-2 text-xs text-zinc-600">ViaProxy {t("servers.viaProxyOff")}</span>}
+                  {s.proxyId && (
+                    <span className="ml-2 rounded bg-indigo-950/70 px-1.5 py-0.5 text-[10px] text-indigo-300">
+                      {proxies.find((p) => p.id === s.proxyId)?.name ?? t("proxies.label")}
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-2.5 text-zinc-400">{botCount(s.id)}</td>
                 <td className="px-4 py-2.5 text-right">
                   <button
                     onClick={() => {
                       setEditingId(s.id);
-                      setForm({ name: s.name, host: s.host, port: String(s.port), version: s.version, viaProxy: s.viaProxy ?? "auto" });
+                      setForm({
+                        name: s.name,
+                        host: s.host,
+                        port: String(s.port),
+                        version: s.version,
+                        viaProxy: s.viaProxy ?? "auto",
+                        proxyId: s.proxyId ?? ""
+                      });
                     }}
                     className="mr-2 text-indigo-400 hover:underline"
                   >
@@ -198,6 +227,8 @@ export function Servers() {
           </tbody>
         </table>
       </div>
+
+      <ProxiesPanel />
     </div>
   );
 }

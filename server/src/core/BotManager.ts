@@ -1,3 +1,4 @@
+import { ProxyStore, type CreateProxyInput, type UpdateProxyInput } from "../modules/proxy/store";
 import { secretStatus } from "../security/secretBox";
 import { normalizeViaProxyMode } from "../modules/versions/viaProxy";
 import { EventEmitter } from "events";
@@ -31,6 +32,7 @@ export interface CreateBotInput {
   autostart?: boolean;
   auth?: BotAuthType;
   accountId?: string | null;
+  proxyId?: string | null;
 }
 
 /**
@@ -41,6 +43,7 @@ export class BotManager extends EventEmitter {
   readonly bots = new Map<string, BotInstance>();
   readonly waypoints = new WaypointStore();
   readonly worldMemory = new WorldMemory();
+  readonly proxies = new ProxyStore();
   readonly rules = new RuleEngine(this);
   servers: ServerProfile[] = [];
   private readonly log = createLogger("manager");
@@ -48,6 +51,7 @@ export class BotManager extends EventEmitter {
   boot() {
     this.waypoints.load();
     this.worldMemory.load();
+    this.proxies.load();
     this.rules.load();
     accounts.load();
     accounts.on("updated", () => this.emit("changed"));
@@ -108,6 +112,15 @@ export class BotManager extends EventEmitter {
 
   // ---- servers ---------------------------------------------------------------
 
+  private validateProxyRef(raw: unknown, allowDirect = false): string | null | undefined {
+    if (raw === undefined) return undefined;
+    if (raw === null || raw === "") return null;
+    const id = String(raw).trim();
+    if (allowDirect && id === "__direct__") return "__direct__";
+    if (!this.proxies.get(id)) throw new PanelError("Selected proxy profile not found.", 404);
+    return id;
+  }
+
   createServer(input: Omit<ServerProfile, "id">): ServerProfile {
     const profile: ServerProfile = {
       id: newId(),
@@ -116,7 +129,8 @@ export class BotManager extends EventEmitter {
       port: clampPort(input.port),
       version: normalizeVersion(input.version),
       note: input.note,
-      viaProxy: normalizeViaProxyMode(input.viaProxy)
+      viaProxy: normalizeViaProxyMode(input.viaProxy),
+      proxyId: this.validateProxyRef(input.proxyId, false) ?? null
     };
     if (!profile.host) throw new PanelError("Server host cannot be empty.");
     this.servers.push(profile);
@@ -139,6 +153,7 @@ export class BotManager extends EventEmitter {
     if (patch.name !== undefined) profile.name = String(patch.name).trim() || profile.name;
     if (patch.note !== undefined) profile.note = patch.note;
     if (patch.viaProxy !== undefined) profile.viaProxy = normalizeViaProxyMode(patch.viaProxy);
+    if (patch.proxyId !== undefined) profile.proxyId = this.validateProxyRef(patch.proxyId, false) ?? null;
     void saveJson(SERVERS_FILE, this.servers);
     this.emit("changed");
     return profile;
@@ -167,6 +182,7 @@ export class BotManager extends EventEmitter {
     this.assertValidNewBot(username, input.serverId);
     const cfg = defaultBotConfig(username, input.serverId);
     cfg.autostart = Boolean(input.autostart);
+    if (input.proxyId !== undefined) cfg.proxyId = this.validateProxyRef(input.proxyId, true) ?? null;
     this.applyAuth(cfg, input.auth, input.accountId, username);
     const instance = this.instantiate(cfg);
     this.persistBots();
@@ -180,8 +196,16 @@ export class BotManager extends EventEmitter {
    * has no {n} and count>1, "_{n}" is appended. Collisions advance n (offline
    * modda isim = kimlik; aynı isim aynı sunucuya iki kez giremez — TODO §12).
    */
-  bulkCreate(template: string, count: number, serverId: string, autostart = false): BotInstance[] {
+  bulkCreate(
+    template: string,
+    count: number,
+    serverId: string,
+    autostart = false,
+    proxyOpts?: { proxyId?: string | null; proxyIds?: string[]; roundRobin?: boolean }
+  ): BotInstance[] {
     const tpl = template.includes("{n}") ? template : count > 1 ? `${template}_{n}` : template;
+    const pool = this.resolveBulkProxyPool(proxyOpts);
+    const singleProxy = proxyOpts?.proxyId !== undefined ? this.validateProxyRef(proxyOpts.proxyId, true) ?? null : undefined;
     const created: BotInstance[] = [];
     let n = 1;
     let made = 0;
@@ -196,6 +220,8 @@ export class BotManager extends EventEmitter {
       }
       const cfg = defaultBotConfig(name, serverId);
       cfg.autostart = autostart;
+      if (pool.length > 0) cfg.proxyId = pool[made % pool.length]!;
+      else if (singleProxy !== undefined) cfg.proxyId = singleProxy;
       const inst = this.instantiate(cfg);
       created.push(inst);
       this.emit("botAdded", inst);
@@ -204,6 +230,18 @@ export class BotManager extends EventEmitter {
     this.persistBots();
     this.log.success(`${created.length} bots created (template: ${tpl})`);
     return created;
+  }
+
+  private resolveBulkProxyPool(proxyOpts?: { proxyIds?: string[]; roundRobin?: boolean }): string[] {
+    if (Array.isArray(proxyOpts?.proxyIds) && proxyOpts.proxyIds.length > 0) {
+      return proxyOpts.proxyIds
+        .map((id) => this.validateProxyRef(id, false))
+        .filter((id): id is string => Boolean(id));
+    }
+    if (proxyOpts?.roundRobin) {
+      return this.proxies.list().filter((p) => p.enabled).map((p) => p.id);
+    }
+    return [];
   }
 
   updateBotConfig(id: string, patch: Partial<BotConfig>): BotInstance {
@@ -237,6 +275,9 @@ export class BotManager extends EventEmitter {
       if (!this.getServer(serverId)) throw new PanelError("Target server profile not found.", 404);
       inst.config.serverId = serverId;
       if (inst.status !== "stopped") this.log.warn("Server changed — restart the bot for it to take effect");
+    }
+    if ("proxyId" in rest) {
+      rest.proxyId = this.validateProxyRef(rest.proxyId, true) ?? null;
     }
     const antiAfkWasOn = Boolean(inst.config.alwaysOn?.antiAfk.enabled);
     inst.config = mergeConfig(inst.config, rest as Partial<BotConfig>);
@@ -340,6 +381,7 @@ export class BotManager extends EventEmitter {
     return {
       secrets: secretStatus(),
       servers: this.servers,
+      proxies: this.proxies.list(),
       bots: [...this.bots.values()].map((b) => b.getSnapshot()),
       waypoints,
       supportedVersions,
@@ -395,6 +437,68 @@ export class BotManager extends EventEmitter {
     this.emit("changed");
   }
 
+  // ---- outbound proxies ------------------------------------------------------
+
+  createProxy(input: CreateProxyInput) {
+    const profile = this.proxies.create(input);
+    this.log.success(`Proxy added: ${profile.name}`);
+    this.emit("changed");
+    return profile;
+  }
+
+  updateProxy(id: string, patch: UpdateProxyInput) {
+    const profile = this.proxies.update(id, patch);
+    this.emit("changed");
+    return profile;
+  }
+
+  deleteProxy(id: string) {
+    this.proxies.remove(id);
+    let serversChanged = false;
+    for (const s of this.servers) {
+      if (s.proxyId === id) {
+        s.proxyId = null;
+        serversChanged = true;
+      }
+    }
+    if (serversChanged) void saveJson(SERVERS_FILE, this.servers);
+    let botsChanged = false;
+    for (const b of this.bots.values()) {
+      if (b.config.proxyId === id) {
+        b.config.proxyId = null;
+        botsChanged = true;
+      }
+    }
+    if (botsChanged) this.persistBots();
+    this.log.info(`Proxy deleted: ${id}`);
+    this.emit("changed");
+  }
+
+  importProxies(rawInput: string | unknown[], defaultProtocol: "socks5" | "socks4" | "http" = "socks5") {
+    const res = this.proxies.importBulk(rawInput, defaultProtocol);
+    if (res.added.length > 0) {
+      this.log.success(`Imported ${res.added.length} proxy profile(s)`);
+      this.emit("changed");
+    }
+    return res;
+  }
+
+  assignProxiesRoundRobin(botIds?: string[], proxyIds?: string[]) {
+    const pool = proxyIds && proxyIds.length > 0
+      ? proxyIds.map((id) => this.validateProxyRef(id, false)).filter((id): id is string => Boolean(id))
+      : this.proxies.list().filter((p) => p.enabled).map((p) => p.id);
+    if (pool.length === 0) throw new PanelError("No enabled proxies available to assign.", 400);
+    const targets = (botIds && botIds.length > 0 ? botIds : [...this.bots.keys()])
+      .map((id) => this.bots.get(id))
+      .filter(isDefined);
+    targets.forEach((inst, i) => {
+      inst.config.proxyId = pool[i % pool.length]!;
+    });
+    this.persistBots();
+    this.emit("changed");
+    return targets.length;
+  }
+
   shutdown() {
     void disconnectDiscord();
     void stopAllViews();
@@ -440,7 +544,8 @@ export class BotManager extends EventEmitter {
         seal: (accountId) => accounts.seal(accountId),
         markJoining: (accountId) => accounts.markJoining(accountId),
         finishPrompt: (accountId, result) => accounts.finishPrompt(accountId, result)
-      }
+      },
+      (pid) => this.proxies.get(pid)
     );
     // A viewer belongs to one mineflayer connection; close it when that connection ends.
     inst.on("status", (p: { status?: string }) => {

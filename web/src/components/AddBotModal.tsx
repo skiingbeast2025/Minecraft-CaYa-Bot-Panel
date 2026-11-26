@@ -15,6 +15,7 @@ function initialServerId(servers: { id: string }[]): string {
 export function AddBotModal({ onClose }: { onClose: () => void }) {
   const { t } = useI18n();
   const servers = useAppStore((s) => s.servers);
+  const proxies = useAppStore((s) => s.proxies);
   const accounts = useAppStore((s) => s.accounts);
   const supportedVersions = useAppStore((s) => s.supportedVersions);
   const applySnapshot = useAppStore((s) => s.applySnapshot);
@@ -27,6 +28,7 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
   const [accountId, setAccountId] = useState("");
   const [count, setCount] = useState(1);
   const [serverId, setServerId] = useState(defaultSid);
+  const [proxyChoice, setProxyChoice] = useState("");
   const [autostart, setAutostart] = useState(false);
   const [startNow, setStartNow] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -66,7 +68,9 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
         sid = profile.id;
       }
       if (effectiveCount > 1) {
-        await api.post("/api/bots/bulk", { template: username, count: effectiveCount, serverId: sid, autostart, startNow });
+        const proxyRoundRobin = proxyChoice === "__round_robin__";
+        const proxyId = proxyRoundRobin ? undefined : proxyChoice || null;
+        await api.post("/api/bots/bulk", { template: username, count: effectiveCount, serverId: sid, autostart, startNow, proxyId, proxyRoundRobin });
       } else {
         await api.post("/api/bots", {
           username: effectiveUsername,
@@ -74,7 +78,8 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
           autostart,
           startNow,
           auth,
-          accountId: auth === "microsoft" ? accountId : null
+          accountId: auth === "microsoft" ? accountId : null,
+          proxyId: proxyChoice === "__round_robin__" ? null : proxyChoice || null
         });
       }
       applySnapshot(await api.get<StateSnapshot>("/api/state"));
@@ -253,6 +258,26 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
               </label>
             </div>
           )}
+
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-zinc-400">{t("proxies.label")}</span>
+            <select
+              value={proxyChoice}
+              onChange={(e) => setProxyChoice(e.target.value)}
+              className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-zinc-100 outline-none focus:border-indigo-500"
+            >
+              <option value="">{t("proxies.inheritServer")}</option>
+              <option value="__direct__">{t("proxies.direct")}</option>
+              {effectiveCount > 1 && proxies.some((p) => p.enabled) && (
+                <option value="__round_robin__">{t("proxies.roundRobin")}</option>
+              )}
+              {proxies.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.protocol})
+                </option>
+              ))}
+            </select>
+          </label>
 
           <div className="flex items-center gap-4 text-sm">
             <label className="flex items-center gap-2 text-zinc-300">

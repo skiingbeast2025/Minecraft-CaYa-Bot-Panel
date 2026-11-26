@@ -54,6 +54,7 @@ Open:
 
 - **Servers newer than the bot library** (for example 26.3 while bots speak up to 26.1): the server profile's **ViaProxy** setting (Auto by default) starts [ViaProxy](https://github.com/ViaVersion/ViaProxy) on this computer and the bot joins through it, even when the server has no ViaBackwards. It needs **Java 17+**, downloads ViaProxy once, and picks up newer ViaProxy releases by itself. Offline-mode servers only.
 - **Anti-cheats on 1.21.2+** (Grim and similar): the panel sends the movement packets the game client sends (input keys, rotation, sprint, tick end), so bots are not pulled back on every step.
+- **Outbound proxies (SOCKS5 / SOCKS4 / HTTP CONNECT):** Manage proxies under **Servers → Outbound Proxies** (single entry or bulk import via text/JSON), set a **Default proxy** on a server profile or override per bot (including bulk round-robin assignment), and keep passwords sealed in `data/proxy-secrets.json.sealed`. Proxied connections fail closed (they never fall back to your direct IP) and assume target servers have **ViaVersion / ViaBackwards** installed so Mineflayer connects directly through the proxy without local Java `ViaProxy`. You can also batch-test a JSON proxy list with `npm run test:proxies`.
 
 > The server listens on `127.0.0.1` by default. This is intentional: the panel has powerful bot-control endpoints and should not be exposed publicly without an authentication layer and a reverse proxy.
 
@@ -907,6 +908,7 @@ Important files include:
 
 ```text
 data/servers.json       server profiles
+data/proxies.json       outbound proxy profiles (non-secret metadata)
 data/bots.json          bot profiles and per-bot settings
 data/rules.json         automation rules and advanced flows
 data/waypoints.json     saved coordinates
@@ -914,6 +916,7 @@ data/schematics/        uploaded schematic files and index
 data/logs/              application logs
 data/auth/              Microsoft token cache (*.sealed, encrypted)
 data/login-secrets.json.sealed   server login passwords (encrypted)
+data/proxy-secrets.json.sealed   outbound proxy passwords (encrypted)
 data/discord-secrets.json.sealed Discord webhook and bot token (encrypted)
 data/mcp-token.json.sealed       MCP bearer token (encrypted)
 data/uptime.json        session uptime and recent disconnects

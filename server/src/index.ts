@@ -11,6 +11,7 @@ import { BotManager } from "./core/BotManager";
 import { AgentService } from "./modules/agent";
 import { createMcpRouter, isBrowserNavigation } from "./modules/agent/mcpHttp";
 import { migrateLoginSecrets } from "./modules/alwaysOn/secrets";
+import { migrateProxySecrets } from "./modules/proxy/secrets";
 import { accounts } from "./modules/auth/accounts";
 import { migrateDiscordSecrets } from "./modules/discord/store";
 import { httpGuard, parseAllowedHosts, socketGuard, type GuardOptions } from "./security/httpGuard";
@@ -54,6 +55,7 @@ async function main() {
     accounts.load();
     migrateDiscordSecrets();
     migrateLoginSecrets();
+    migrateProxySecrets();
   } catch (err) {
     log.error("Secret migration failed", String(err));
   }

@@ -85,12 +85,19 @@ export function mineflayerSpeaks(protocol: number): boolean {
 }
 
 /** Server list ping: protocol number and version name, or null when unreachable. */
-export async function pingServer(host: string, port: number, timeoutMs = 6_000): Promise<{ protocol: number; name: string } | null> {
+export async function pingServer(
+  host: string,
+  port: number,
+  timeoutMs = 6_000,
+  connect?: (client: any) => void
+): Promise<{ protocol: number; name: string } | null> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const mc = require("minecraft-protocol") as { ping(opts: Record<string, unknown>): Promise<unknown> };
+    const opts: Record<string, unknown> = { host, port, closeTimeout: timeoutMs, noPongTimeout: timeoutMs };
+    if (connect) opts.connect = connect;
     const res = (await Promise.race([
-      mc.ping({ host, port, closeTimeout: timeoutMs, noPongTimeout: timeoutMs }),
+      mc.ping(opts),
       new Promise((_, rej) => setTimeout(() => rej(new Error("ping timeout")), timeoutMs + 500))
     ])) as { version?: { protocol?: number; name?: string } };
     const protocol = Number(res?.version?.protocol);

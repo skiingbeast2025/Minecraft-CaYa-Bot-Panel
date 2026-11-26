@@ -1,5 +1,19 @@
 // server/src/types.ts'in panel tarafı aynası (ortak paket: Backlog).
 
+export type ProxyProtocol = "socks5" | "socks4" | "http";
+
+export interface ProxyProfile {
+  id: string;
+  name: string;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string;
+  hasPassword?: boolean;
+  enabled: boolean;
+  note?: string;
+}
+
 export interface ServerProfile {
   id: string;
   name: string;
@@ -8,6 +22,7 @@ export interface ServerProfile {
   version: string;
   note?: string;
   viaProxy?: "auto" | "always" | "off";
+  proxyId?: string | null;
 }
 
 export type BotStatus = "stopped" | "connecting" | "online" | "reconnecting" | "kicked" | "error";
@@ -48,6 +63,7 @@ export interface BotConfig {
   alwaysOn?: { antiAfk?: { enabled?: boolean } };
   auth?: BotAuthType;
   accountId?: string | null;
+  proxyId?: string | null;
   authorizedPlayers: string[];
   inventory: { autoBestGear: boolean; bannedItems: string[]; keepItems: string[] };
   combat: {
@@ -395,6 +411,7 @@ export interface ChestMemory {
 
 export interface StateSnapshot {
   servers: ServerProfile[];
+  proxies?: ProxyProfile[];
   bots: BotSnapshot[];
   waypoints: Record<string, Waypoint[]>;
   supportedVersions: string[];

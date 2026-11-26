@@ -6,7 +6,7 @@ import {
   type AppLocale,
   type LocalePreference
 } from "../i18n";
-import type { AuthAccount, BotSnapshot, ChatEntry, ChestMemory, DeviceCodePrompt, LogEntry, McpStatusPayload, ServerProfile, StateSnapshot, Waypoint } from "../lib/types";
+import type { AuthAccount, BotSnapshot, ChatEntry, ChestMemory, DeviceCodePrompt, LogEntry, McpStatusPayload, ProxyProfile, ServerProfile, StateSnapshot, Waypoint } from "../lib/types";
 
 const CHAT_CAP = 500;
 const LOG_CAP = 1000;
@@ -25,6 +25,7 @@ interface AppState {
   connected: boolean;
   snapshotLoaded: boolean;
   servers: ServerProfile[];
+  proxies: ProxyProfile[];
   supportedVersions: string[];
   bots: Record<string, BotSnapshot>;
   waypoints: Record<string, Waypoint[]>;
@@ -66,6 +67,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   connected: false,
   snapshotLoaded: false,
   servers: [],
+  proxies: [],
   supportedVersions: [],
   bots: {},
   waypoints: {},
@@ -113,6 +115,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       for (const id of Object.keys(chat)) if (!bots[id]) delete chat[id];
       return {
         servers: s.servers,
+        proxies: s.proxies ?? [],
         supportedVersions: s.supportedVersions,
         bots,
         chat,

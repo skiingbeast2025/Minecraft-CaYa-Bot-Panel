@@ -43,6 +43,7 @@ export function BotDetail() {
   const navigate = useNavigate();
   const bot = useAppStore((s) => s.bots[id]);
   const servers = useAppStore((s) => s.servers);
+  const proxies = useAppStore((s) => s.proxies);
   const accounts = useAppStore((s) => s.accounts);
   const applySnapshot = useAppStore((s) => s.applySnapshot);
   const toast = useAppStore((s) => s.toast);
@@ -53,6 +54,7 @@ export function BotDetail() {
   const [authSaving, setAuthSaving] = useState(false);
   const [loginMode, setLoginMode] = useState<"offline" | "microsoft">("offline");
   const [accountId, setAccountId] = useState("");
+  const [proxyId, setProxyId] = useState("");
 
   const TABS: { id: Tab; label: string; icon: typeof MessageSquare }[] = [
     { id: "chat", label: t("botDetail.tabs.chat"), icon: MessageSquare },
@@ -76,7 +78,8 @@ export function BotDetail() {
     setAuthText((bot.config.authorizedPlayers ?? []).join(", "));
     setLoginMode(bot.config.auth === "microsoft" ? "microsoft" : "offline");
     setAccountId(bot.config.accountId ?? "");
-  }, [id, bot?.config.authorizedPlayers?.join(","), bot?.config.auth, bot?.config.accountId]);
+    setProxyId(bot.config.proxyId ?? "");
+  }, [id, bot?.config.authorizedPlayers?.join(","), bot?.config.auth, bot?.config.accountId, bot?.config.proxyId]);
 
   if (!bot) {
     return (
@@ -90,6 +93,8 @@ export function BotDetail() {
   }
 
   const server = servers.find((s) => s.id === bot.config.serverId);
+  const effectiveProxyId = bot.config.proxyId === "__direct__" ? null : bot.config.proxyId || server?.proxyId || null;
+  const effectiveProxy = effectiveProxyId ? proxies.find((p) => p.id === effectiveProxyId) : null;
   const running = bot.status !== "stopped";
 
   const refresh = async () => applySnapshot(await api.get<StateSnapshot>("/api/state"));
@@ -160,7 +165,8 @@ export function BotDetail() {
     try {
       await api.patch(`/api/bots/${id}`, {
         auth: loginMode,
-        accountId: loginMode === "microsoft" ? accountId : null
+        accountId: loginMode === "microsoft" ? accountId : null,
+        proxyId: proxyId || null
       });
       await refresh();
       toast("success", t("common.save"));
@@ -186,6 +192,11 @@ export function BotDetail() {
             ? `${server.name} · ${server.host}:${server.port} · ${server.version}`
             : t("settings.serverProfiles")}
         </span>
+        {effectiveProxy && (
+          <span className="rounded bg-indigo-950/70 px-1.5 py-0.5 text-[10px] text-indigo-300">
+            {effectiveProxy.name} ({effectiveProxy.protocol})
+          </span>
+        )}
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 text-xs text-zinc-400">
             <input type="checkbox" checked={bot.config.autostart} onChange={() => void toggleAutostart()} />
@@ -377,6 +388,22 @@ export function BotDetail() {
                       </select>
                     </label>
                   )}
+                  <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                    {t("proxies.label")}
+                    <select
+                      value={proxyId}
+                      onChange={(e) => setProxyId(e.target.value)}
+                      className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100"
+                    >
+                      <option value="">{t("proxies.inheritServer")}</option>
+                      <option value="__direct__">{t("proxies.direct")}</option>
+                      {proxies.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.protocol})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <button type="button" onClick={() => void saveLogin()} className="cursor-pointer rounded-lg bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-500 active:bg-indigo-800">
                     {t("common.save")}
                   </button>

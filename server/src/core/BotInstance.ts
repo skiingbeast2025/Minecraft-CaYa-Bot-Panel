@@ -4,6 +4,7 @@ import * as path from "path";
 import { createBot, type Bot } from "mineflayer";
 import { CHAT_LOGS_DIR } from "../config/paths";
 import { installProtocolCompat, type ProtocolCompatHandle } from "./protocolCompat";
+import { createProxyConnect, redactProxySecrets } from "../modules/proxy/connect";
 import {
   acquireViaProxy,
   mineflayerSpeaks,
@@ -18,6 +19,11 @@ import {
 interface ViaRoute {
   lease: ProxyLease;
   version: string;
+}
+
+export interface ResolvedProxy {
+  profile: ProxyProfile;
+  password: string | null;
 }
 import { ANTI_AFK_LOCK, antiAfkAllowed, antiAfkAllowsAction, antiAfkMode, clampAntiAfkHold, clampAntiAfkInterval, pickAntiAfkAction } from "../modules/alwaysOn/antiAfk";
 
@@ -56,6 +62,7 @@ import type {
   ChatEntry,
   ServerCommandList,
   InventorySnapshot,
+  ProxyProfile,
   ServerProfile,
   TaskSummary
 } from "../types";
@@ -152,7 +159,8 @@ export class BotInstance extends EventEmitter {
       seal(accountId: string): void;
       markJoining(accountId: string): void;
       finishPrompt(accountId: string, result: { ok: boolean; errorCode?: string }): void;
-    }
+    },
+    private readonly getProxy?: (id: string) => ResolvedProxy | null
   ) {
     super();
     this.log = createLogger("bot", config.id);
@@ -1085,6 +1093,21 @@ export class BotInstance extends EventEmitter {
 
   // ---- connection -----------------------------------------------------------
 
+  private resolveEffectiveProxy(server: ServerProfile): ResolvedProxy | null {
+    const rawId = this.config.proxyId;
+    if (rawId === "__direct__") return null;
+    const effectiveId = rawId || server.proxyId || null;
+    if (!effectiveId) return null;
+    const resolved = this.getProxy?.(effectiveId) ?? null;
+    if (!resolved) {
+      throw new Error("Assigned outbound proxy profile was not found — refusing direct fallback.");
+    }
+    if (!resolved.profile.enabled) {
+      throw new Error(`Assigned outbound proxy "${resolved.profile.name}" is disabled — refusing direct fallback.`);
+    }
+    return resolved;
+  }
+
   private connect() {
     const server = this.getServer(this.config.serverId);
     if (!server) {
@@ -1093,29 +1116,39 @@ export class BotInstance extends EventEmitter {
       this.setStatus("error");
       return;
     }
+    let proxy: ResolvedProxy | null = null;
+    try {
+      proxy = this.resolveEffectiveProxy(server);
+    } catch (err) {
+      this.runtime.lastError = err instanceof Error ? err.message : String(err);
+      this.log.error("Proxy", this.runtime.lastError);
+      this.wantsRunning = false;
+      this.setStatus("error");
+      return;
+    }
     const mode = normalizeViaProxyMode(server.viaProxy);
     if (mode === "off") {
-      this.openConnection(server, null);
+      this.openConnection(server, null, proxy);
       return;
     }
     const attempt = ++this.connectSeq;
     this.setStatus("connecting");
-    void this.resolveRoute(server, mode).then(
+    void this.resolveRoute(server, mode, proxy).then(
       (route) => {
         if (attempt !== this.connectSeq || !this.wantsRunning || this.bot) {
           route?.lease.release();
           return;
         }
-        this.openConnection(server, route);
+        this.openConnection(server, route, proxy);
       },
       (err: unknown) => {
         if (attempt !== this.connectSeq || !this.wantsRunning) return;
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = redactProxySecrets(err instanceof Error ? err.message : String(err), proxy?.profile, proxy?.password);
         this.runtime.lastError = msg;
         this.log.error("ViaProxy", msg);
         this.setStatus("error");
-        // a missing Java or a Microsoft account will not fix itself
-        if (/needs Java|Microsoft/.test(msg)) this.wantsRunning = false;
+        // a missing Java, Microsoft account, or incompatible ViaProxy+proxy setup will not fix itself
+        if (/needs Java|Microsoft|Outbound proxy|ViaProxy/.test(msg)) this.wantsRunning = false;
         else this.scheduleReconnect();
       }
     );
@@ -1125,14 +1158,27 @@ export class BotInstance extends EventEmitter {
    * Newer server than mineflayer speaks (or ViaProxy forced on): run ViaProxy and
    * join it with the newest version mineflayer knows. null = connect directly.
    */
-  private async resolveRoute(server: ServerProfile, mode: ViaProxyMode): Promise<ViaRoute | null> {
+  private async resolveRoute(server: ServerProfile, mode: ViaProxyMode, proxy: ResolvedProxy | null): Promise<ViaRoute | null> {
     let reason: string;
     if (mode === "always") {
+      if (proxy) {
+        throw new Error(
+          "Outbound proxy cannot be combined with ViaProxy. Disable ViaProxy on the server profile (servers with ViaVersion/ViaBackwards do not need it) or set bot proxy to Direct."
+        );
+      }
       reason = "ViaProxy is set to always for this server";
     } else {
-      const ping = await pingServer(server.host, server.port);
+      const pingConnect = proxy
+        ? createProxyConnect(server.host, server.port, proxy.profile, proxy.password, 6_000)
+        : undefined;
+      const ping = await pingServer(server.host, server.port, 6_000, pingConnect);
       if (!ping || mineflayerSpeaks(ping.protocol)) return null;
       reason = `server runs ${ping.name || "?"} (protocol ${ping.protocol}), newer than mineflayer supports`;
+      if (proxy) {
+        throw new Error(
+          `${reason}, and Java ViaProxy does not route through outbound proxies. Install ViaVersion/ViaBackwards on the server and set ViaProxy to Off, or remove the proxy.`
+        );
+      }
     }
     if (this.config.auth === "microsoft") {
       throw new Error(
@@ -1145,7 +1191,7 @@ export class BotInstance extends EventEmitter {
     return { lease, version };
   }
 
-  private openConnection(server: ServerProfile, route: ViaRoute | null) {
+  private openConnection(server: ServerProfile, route: ViaRoute | null, proxy: ResolvedProxy | null) {
     this.viaLease?.release();
     this.viaLease = route?.lease ?? null;
 
@@ -1153,7 +1199,9 @@ export class BotInstance extends EventEmitter {
     this.log.info(
       route
         ? `Connecting: ${server.host}:${server.port} through ViaProxy (127.0.0.1:${route.lease.port}, bot version ${route.version})`
-        : `Connecting: ${server.host}:${server.port} (version: ${server.version})`
+        : proxy
+          ? `Connecting: ${server.host}:${server.port} via ${proxy.profile.protocol}://${proxy.profile.host}:${proxy.profile.port} (version: ${server.version})`
+          : `Connecting: ${server.host}:${server.port} (version: ${server.version})`
     );
 
     let bot: Bot | null = null;
@@ -1167,6 +1215,9 @@ export class BotInstance extends EventEmitter {
       checkTimeoutInterval: 60_000,
       hideErrors: true // we surface errors ourselves via the panel log
     };
+    if (!route && proxy) {
+      options.connect = createProxyConnect(server.host, server.port, proxy.profile, proxy.password);
+    }
 
     if (auth === "microsoft") {
       const accountId = this.config.accountId;
@@ -1344,7 +1395,7 @@ export class BotInstance extends EventEmitter {
     });
 
     bot.on("error", (err: Error) => {
-      const msg = friendlyError(err);
+      const msg = redactProxySecrets(friendlyError(err));
       this.runtime.lastError = msg;
       this.log.error("Connection error", msg);
       if (this.authInteraction || this.devicePromptOpen) {

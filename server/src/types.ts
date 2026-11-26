@@ -1,5 +1,20 @@
 import * as crypto from "crypto";
 
+export type ProxyProtocol = "socks5" | "socks4" | "http";
+
+export interface ProxyProfile {
+  id: string;
+  name: string;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string;
+  /** Derived at runtime from proxy-secrets.json. Password is never persisted in proxies.json. */
+  hasPassword?: boolean;
+  enabled: boolean;
+  note?: string;
+}
+
 export interface ServerProfile {
   id: string;
   name: string;
@@ -13,6 +28,8 @@ export interface ServerProfile {
    * newer than mineflayer speaks. "always": every connection. "off": never.
    */
   viaProxy?: "auto" | "always" | "off";
+  /** Optional default outbound proxy profile id for bots on this server. */
+  proxyId?: string | null;
 }
 
 export type BotStatus =
@@ -224,6 +241,8 @@ export interface BotConfig {
   auth?: BotAuthType;
   /** id in data/auth/accounts.json — tokens are never stored here */
   accountId?: string | null;
+  /** Optional proxy override: proxyId, "__direct__" to bypass server default, or null/undefined to inherit server default. */
+  proxyId?: string | null;
   /** players allowed to trigger chat-command automations (İ3) */
   authorizedPlayers: string[];
   /** 24/7 reconnect, anti-AFK, and login-plugin. The password is not stored here. */
@@ -455,6 +474,7 @@ export interface BotSnapshot {
 
 export interface StateSnapshot {
   servers: ServerProfile[];
+  proxies?: ProxyProfile[];
   bots: BotSnapshot[];
   waypoints: Record<string, Waypoint[]>;
   supportedVersions: string[];

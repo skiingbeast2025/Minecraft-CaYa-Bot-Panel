@@ -27,6 +27,8 @@ import {
 } from "../modules/auth/accounts";
 import { getVersionSyncStatus, installPublishedMineflayer } from "../modules/versions/sync";
 import { writeLoginSecret } from "../modules/alwaysOn/secrets";
+import { testProxyConnection } from "../modules/proxy/connect";
+import { normalizeProxyProtocol } from "../modules/proxy/store";
 import { discordPublicState, testWebhook, updateDiscordSettings } from "../modules/discord/hub";
 import { validateTemplate, templateFromRules } from "../modules/templates/schema";
 import { deleteUserTemplate, getTemplate, listTemplates, saveUserTemplate } from "../modules/templates/store";
@@ -165,12 +167,66 @@ export function createRestRouter(manager: BotManager, supportedVersions: string[
     })
   );
 
+  // ---- proxies ----------------------------------------------------------------
+  r.get(
+    "/proxies",
+    h((_req, res) => {
+      res.json(manager.proxies.list());
+    })
+  );
+  r.post(
+    "/proxies",
+    h((req, res) => {
+      res.json(manager.createProxy(req.body ?? {}));
+    })
+  );
+  r.post(
+    "/proxies/import",
+    h((req, res) => {
+      const body = req.body ?? {};
+      const input = body.proxies ?? body.text ?? body.raw ?? "";
+      const defaultProtocol = body.defaultProtocol ? normalizeProxyProtocol(body.defaultProtocol) : "socks5";
+      res.json(manager.importProxies(input, defaultProtocol));
+    })
+  );
+  r.post(
+    "/proxies/assign-round-robin",
+    h((req, res) => {
+      const botIds = Array.isArray(req.body?.botIds) ? (req.body.botIds as unknown[]).map(String) : undefined;
+      const proxyIds = Array.isArray(req.body?.proxyIds) ? (req.body.proxyIds as unknown[]).map(String) : undefined;
+      res.json({ ok: true, count: manager.assignProxiesRoundRobin(botIds, proxyIds) });
+    })
+  );
+  r.patch(
+    "/proxies/:id",
+    h((req, res) => {
+      res.json(manager.updateProxy(req.params.id!, req.body ?? {}));
+    })
+  );
+  r.delete(
+    "/proxies/:id",
+    h((req, res) => {
+      manager.deleteProxy(req.params.id!);
+      res.json({ ok: true });
+    })
+  );
+  r.post(
+    "/proxies/:id/test",
+    h(async (req, res) => {
+      const found = manager.proxies.get(req.params.id!);
+      if (!found) throw new PanelError("Proxy profile not found.", 404);
+      const targetHost = typeof req.body?.host === "string" ? req.body.host : undefined;
+      const targetPort = req.body?.port != null ? Number(req.body.port) : undefined;
+      res.json(await testProxyConnection(found.profile, found.password, targetHost, targetPort));
+    })
+  );
+
   // ---- bots -------------------------------------------------------------------
   r.post(
     "/bots",
     h((req, res) => {
-      const { username, serverId, autostart, startNow, auth, accountId } = req.body ?? {};
-      const inst = manager.createBot({ username, serverId, autostart, auth, accountId });
+      const { username, serverId, autostart, startNow, auth, accountId, proxyId } = req.body ?? {};
+      const inst = manager.createBot({ username, serverId, autostart, auth, accountId, proxyId });
       if (startNow) manager.startBot(inst.config.id, socketId(req));
       res.json(inst.getSnapshot());
     })
@@ -179,9 +235,13 @@ export function createRestRouter(manager: BotManager, supportedVersions: string[
   r.post(
     "/bots/bulk",
     h((req, res) => {
-      const { template, count, serverId, autostart, startNow } = req.body ?? {};
+      const { template, count, serverId, autostart, startNow, proxyId, proxyIds, proxyRoundRobin } = req.body ?? {};
       const n = Math.max(1, Math.min(50, Math.floor(Number(count) || 1)));
-      const created = manager.bulkCreate(String(template || "CaYa_{n}"), n, String(serverId || ""), Boolean(autostart));
+      const created = manager.bulkCreate(String(template || "CaYa_{n}"), n, String(serverId || ""), Boolean(autostart), {
+        proxyId,
+        proxyIds: Array.isArray(proxyIds) ? proxyIds.map(String) : undefined,
+        roundRobin: Boolean(proxyRoundRobin)
+      });
       if (startNow) manager.startStaggered(created.map((b) => b.config.id));
       res.json({ created: created.map((b) => b.getSnapshot()) });
     })
