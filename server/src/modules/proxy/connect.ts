@@ -5,6 +5,8 @@ import type { ProxyProfile } from "../../types";
 
 export interface McProtocolClientLike {
   ended?: boolean;
+  _endReason?: unknown;
+  once?(event: string, listener: (...args: unknown[]) => void): unknown;
   setSocket(socket: net.Socket): void;
   emit(event: string, ...args: unknown[]): boolean;
 }
@@ -154,17 +156,23 @@ export function createProxyConnect(
   timeoutMs = DEFAULT_PROXY_TIMEOUT_MS
 ): ConnectHook {
   return (client: McProtocolClientLike) => {
+    let aborted = false;
+    client.once?.("end", () => {
+      aborted = true;
+    });
     void (async () => {
       try {
         const target = await resolveMinecraftSrv(targetHost, targetPort);
         const socket = await dialThroughProxy(proxy, password, target.host, target.port, timeoutMs);
-        if (client.ended) {
+        // minecraft-protocol Client initializes `ended = true` until `setSocket()` sets it to `false`.
+        if (aborted || client._endReason !== undefined) {
           socket.destroy();
           return;
         }
         client.setSocket(socket);
         client.emit("connect");
       } catch (err) {
+        if (aborted || client._endReason !== undefined) return;
         const msg = redactProxySecrets(err instanceof Error ? err.message : String(err), proxy, password);
         client.emit("error", new Error(`Proxy (${proxy.protocol}://${proxy.host}:${proxy.port}) failed: ${msg}`));
       }

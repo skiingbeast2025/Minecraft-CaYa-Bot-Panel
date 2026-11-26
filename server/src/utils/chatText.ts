@@ -89,6 +89,7 @@ function readChat(reason: unknown): string {
 /** map low-level connection errors to actionable English messages */
 export function friendlyError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
+  if (msg.startsWith("Proxy (")) return msg;
   if (msg.includes("ECONNREFUSED")) return "Could not reach the server (connection refused) — is the IP/port correct and the server online?";
   if (msg.includes("ENOTFOUND")) return "Could not resolve server address — check the IP/domain.";
   if (msg.includes("ETIMEDOUT") || msg.includes("timed out")) return "Connection timed out — is the server reachable?";

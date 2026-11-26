@@ -172,8 +172,10 @@ function connectWithHook(hook: ConnectHook): Promise<string> {
   return new Promise((resolve, reject) => {
     let sock: net.Socket | null = null;
     const fakeClient = {
-      ended: false,
+      // Match minecraft-protocol Client constructor, which starts with ended=true until setSocket().
+      ended: true,
       setSocket(s: net.Socket) {
+        this.ended = false;
         sock = s;
       },
       emit(event: string, ...args: unknown[]) {
@@ -203,6 +205,7 @@ async function run() {
   const { parseProxyLine, ProxyStore } = await import("../server/src/modules/proxy/store");
   const { initSecretBox, setSecretKeyForTests } = await import("../server/src/security/secretBox");
   const { BotManager } = await import("../server/src/core/BotManager");
+  const { friendlyError } = await import("../server/src/utils/chatText");
 
   await initSecretBox();
   setSecretKeyForTests(crypto.randomBytes(32));
@@ -235,6 +238,8 @@ async function run() {
   console.log("secret redaction");
   const redacted = redactProxySecrets("failed socks5://alice:s3cr3t@1.2.3.4:1080 auth for alice / s3cr3t", { username: "alice" }, "s3cr3t");
   assert("redacts credentials from errors", !redacted.includes("alice") && !redacted.includes("s3cr3t"));
+  const proxyErr = friendlyError(new Error("Proxy (socks5://1.2.3.4:1080) failed: connect ECONNREFUSED 1.2.3.4:1080"));
+  assert("friendlyError preserves proxy errors", proxyErr.startsWith("Proxy (socks5://1.2.3.4:1080) failed:"));
 
   console.log("mock echo + proxies");
   const echoServer = net.createServer((s) => {
