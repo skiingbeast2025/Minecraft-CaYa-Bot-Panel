@@ -352,14 +352,14 @@ export class BotManager extends EventEmitter {
   }
 
   /** Compute start delays per bot, staggering only bots sharing the same (server, outbound IP) bucket. */
-  planStaggeredStarts(ids?: string[]): Array<{ inst: BotInstance; delayMs: number }> {
+  planStaggeredStarts(ids?: string[], staggerMs = BULK_START_STAGGER_MS): Array<{ inst: BotInstance; delayMs: number }> {
     const targets = (ids ?? [...this.bots.keys()]).map((id) => this.bots.get(id)).filter(isDefined);
     const bucketCounts = new Map<string, number>();
     return targets.map((inst) => {
       const key = this.outboundIpKey(inst);
       const sameIpIndex = bucketCounts.get(key) ?? 0;
       bucketCounts.set(key, sameIpIndex + 1);
-      const delayMs = sameIpIndex * BULK_START_STAGGER_MS + clampAutostartDelaySec(inst.config.autostartDelaySec) * 1000;
+      const delayMs = sameIpIndex * staggerMs + clampAutostartDelaySec(inst.config.autostartDelaySec) * 1000;
       return { inst, delayMs };
     });
   }

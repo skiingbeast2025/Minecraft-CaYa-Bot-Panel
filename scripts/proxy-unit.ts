@@ -285,17 +285,17 @@ async function run() {
 
     const b1 = mgr.createBot({ username: "ProxBot1", serverId: srv.id, proxyId: pxA.id });
     const b2 = mgr.createBot({ username: "ProxBot2", serverId: srv.id, proxyId: pxB.id });
-    const distinctPlan = mgr.planStaggeredStarts([b1.config.id, b2.config.id]);
+    const distinctPlan = mgr.planStaggeredStarts([b1.config.id, b2.config.id], 2000);
     assert("distinct proxy IPs have 0ms connection stagger", distinctPlan.every((p) => p.delayMs === 0));
 
     const b3 = mgr.createBot({ username: "ProxBot3", serverId: srv.id, proxyId: pxASameIp.id });
-    const mixedPlan = mgr.planStaggeredStarts([b1.config.id, b2.config.id, b3.config.id]);
-    assert("same outbound IP staggers subsequent bots on that IP", mixedPlan[0]?.delayMs === 0 && mixedPlan[1]?.delayMs === 0 && (mixedPlan[2]?.delayMs ?? 0) > 0);
+    const mixedPlan = mgr.planStaggeredStarts([b1.config.id, b2.config.id, b3.config.id], 2000);
+    assert("same outbound IP staggers subsequent bots on that IP", mixedPlan[0]?.delayMs === 0 && mixedPlan[1]?.delayMs === 0 && (mixedPlan[2]?.delayMs ?? 0) === 2000);
 
     const d1 = mgr.createBot({ username: "DirectBot1", serverId: srv.id, proxyId: "__direct__" });
     const d2 = mgr.createBot({ username: "DirectBot2", serverId: srv.id, proxyId: "__direct__" });
-    const directPlan = mgr.planStaggeredStarts([d1.config.id, d2.config.id]);
-    assert("direct bots on same server stagger", directPlan[0]?.delayMs === 0 && (directPlan[1]?.delayMs ?? 0) > 0);
+    const directPlan = mgr.planStaggeredStarts([d1.config.id, d2.config.id], 2000);
+    assert("direct bots on same server stagger", directPlan[0]?.delayMs === 0 && directPlan[1]?.delayMs === 2000);
   } finally {
     await httpProxy.close();
     await socksProxy.close();
