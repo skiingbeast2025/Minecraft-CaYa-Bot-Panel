@@ -105,7 +105,13 @@ export class BotManager extends EventEmitter {
     void connectDiscord();
     const autostart = [...this.bots.values()].filter((b) => b.config.autostart);
     if (autostart.length > 0) {
-      this.log.info(`${autostart.length} bot(s) marked autostart — starting gradually (I4)`);
+      const plan = this.planStaggeredStarts(autostart.map((b) => b.config.id));
+      const hasDelay = plan.some((entry) => entry.delayMs > 0);
+      this.log.info(
+        hasDelay
+          ? `${autostart.length} bot(s) marked autostart — starting with per-IP stagger`
+          : `${autostart.length} bot(s) marked autostart — starting in parallel across distinct IPs`
+      );
       this.startStaggered(autostart.map((b) => b.config.id));
     }
   }
@@ -333,24 +339,55 @@ export class BotManager extends EventEmitter {
     inst.resetAllWork(reason);
   }
 
-  /** staggered start to avoid connection-flood kicks (Faz 2) */
-  startStaggered(ids?: string[]) {
+  /** Group stagger counters by (server, outbound IP) so distinct proxy IPs connect with 0 stagger. */
+  private outboundIpKey(inst: BotInstance): string {
+    const rawId = inst.config.proxyId;
+    if (rawId === "__direct__") return `${inst.config.serverId}::direct`;
+    const server = this.getServer(inst.config.serverId);
+    const effectiveId = rawId || server?.proxyId || null;
+    if (!effectiveId) return `${inst.config.serverId}::direct`;
+    const proxy = this.proxies.get(effectiveId)?.profile;
+    if (!proxy) return `${inst.config.serverId}::proxy-id:${effectiveId}`;
+    return `${inst.config.serverId}::ip:${proxy.host.trim().toLowerCase()}`;
+  }
+
+  /** Compute start delays per bot, staggering only bots sharing the same (server, outbound IP) bucket. */
+  planStaggeredStarts(ids?: string[]): Array<{ inst: BotInstance; delayMs: number }> {
     const targets = (ids ?? [...this.bots.keys()]).map((id) => this.bots.get(id)).filter(isDefined);
-    targets.forEach((inst, i) => {
-      setTimeout(() => {
-        if (!this.bots.has(inst.config.id)) return;
-        try {
-          this.assertAccountFree(inst);
-          inst.start();
-        } catch (err) {
-          inst.runtime.lastError = err instanceof Error ? err.message : String(err);
-          inst.runtime.errorCode = "auth.failed";
-          this.log.warn(`Could not start ${inst.config.username}`, inst.runtime.lastError);
-          this.emit("changed");
-        }
-      }, i * BULK_START_STAGGER_MS + clampAutostartDelaySec(inst.config.autostartDelaySec) * 1000);
+    const bucketCounts = new Map<string, number>();
+    return targets.map((inst) => {
+      const key = this.outboundIpKey(inst);
+      const sameIpIndex = bucketCounts.get(key) ?? 0;
+      bucketCounts.set(key, sameIpIndex + 1);
+      const delayMs = sameIpIndex * BULK_START_STAGGER_MS + clampAutostartDelaySec(inst.config.autostartDelaySec) * 1000;
+      return { inst, delayMs };
     });
-    return targets.length;
+  }
+
+  private startPlannedBot(inst: BotInstance) {
+    if (!this.bots.has(inst.config.id)) return;
+    try {
+      this.assertAccountFree(inst);
+      inst.start();
+    } catch (err) {
+      inst.runtime.lastError = err instanceof Error ? err.message : String(err);
+      inst.runtime.errorCode = "auth.failed";
+      this.log.warn(`Could not start ${inst.config.username}`, inst.runtime.lastError);
+      this.emit("changed");
+    }
+  }
+
+  /** Stagger bots that share an outbound IP while letting distinct-IP bots connect immediately. */
+  startStaggered(ids?: string[]) {
+    const plan = this.planStaggeredStarts(ids);
+    for (const { inst, delayMs } of plan) {
+      if (delayMs <= 0) {
+        this.startPlannedBot(inst);
+      } else {
+        setTimeout(() => this.startPlannedBot(inst), delayMs);
+      }
+    }
+    return plan.length;
   }
 
   stopAll(ids?: string[]) {

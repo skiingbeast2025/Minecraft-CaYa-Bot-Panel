@@ -202,6 +202,7 @@ async function run() {
   const { deleteProxySecret, hasProxySecret, readProxySecret, writeProxySecret } = await import("../server/src/modules/proxy/secrets");
   const { parseProxyLine, ProxyStore } = await import("../server/src/modules/proxy/store");
   const { initSecretBox, setSecretKeyForTests } = await import("../server/src/security/secretBox");
+  const { BotManager } = await import("../server/src/core/BotManager");
 
   await initSecretBox();
   setSecretKeyForTests(crypto.randomBytes(32));
@@ -273,10 +274,33 @@ async function run() {
 
     const testRes = await testProxyConnection({ ...socksProfile, host: "127.0.0.1", port: 1 }, "sp", undefined, undefined, 1000);
     assert("testProxyConnection reports failure on dead port", !testRes.ok && testRes.latencyMs === null);
+
+    console.log("per-IP connection stagger");
+    const mgr = new BotManager();
+    mgr.proxies.load();
+    const srv = mgr.createServer({ name: "TestSrv", host: "127.0.0.1", port: 25565, version: "1.20.4" });
+    const pxA = mgr.createProxy({ name: "ProxyA", protocol: "socks5", host: "10.10.0.1", port: 1080 });
+    const pxB = mgr.createProxy({ name: "ProxyB", protocol: "http", host: "10.10.0.2", port: 8080 });
+    const pxASameIp = mgr.createProxy({ name: "ProxyA2", protocol: "http", host: "10.10.0.1", port: 3128 });
+
+    const b1 = mgr.createBot({ username: "ProxBot1", serverId: srv.id, proxyId: pxA.id });
+    const b2 = mgr.createBot({ username: "ProxBot2", serverId: srv.id, proxyId: pxB.id });
+    const distinctPlan = mgr.planStaggeredStarts([b1.config.id, b2.config.id]);
+    assert("distinct proxy IPs have 0ms connection stagger", distinctPlan.every((p) => p.delayMs === 0));
+
+    const b3 = mgr.createBot({ username: "ProxBot3", serverId: srv.id, proxyId: pxASameIp.id });
+    const mixedPlan = mgr.planStaggeredStarts([b1.config.id, b2.config.id, b3.config.id]);
+    assert("same outbound IP staggers subsequent bots on that IP", mixedPlan[0]?.delayMs === 0 && mixedPlan[1]?.delayMs === 0 && (mixedPlan[2]?.delayMs ?? 0) > 0);
+
+    const d1 = mgr.createBot({ username: "DirectBot1", serverId: srv.id, proxyId: "__direct__" });
+    const d2 = mgr.createBot({ username: "DirectBot2", serverId: srv.id, proxyId: "__direct__" });
+    const directPlan = mgr.planStaggeredStarts([d1.config.id, d2.config.id]);
+    assert("direct bots on same server stagger", directPlan[0]?.delayMs === 0 && (directPlan[1]?.delayMs ?? 0) > 0);
   } finally {
     await httpProxy.close();
     await socksProxy.close();
     await new Promise<void>((r) => echoServer.close(() => r()));
+    await new Promise((r) => setTimeout(r, 50));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 
