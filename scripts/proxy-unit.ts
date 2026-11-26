@@ -11,11 +11,7 @@ import * as path from "path";
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "caya-proxy-unit-"));
 process.env.CAYA_DATA_DIR = tmpDir;
 
-import { DATA_DIR } from "../server/src/config/paths";
-import { createProxyConnect, redactProxySecrets, testProxyConnection } from "../server/src/modules/proxy/connect";
-import { deleteProxySecret, hasProxySecret, readProxySecret, writeProxySecret } from "../server/src/modules/proxy/secrets";
-import { parseProxyLine, ProxyStore } from "../server/src/modules/proxy/store";
-import { initSecretBox, setSecretKeyForTests } from "../server/src/security/secretBox";
+import type { ConnectHook } from "../server/src/modules/proxy/connect";
 import type { ProxyProfile } from "../server/src/types";
 
 let failures = 0;
@@ -172,7 +168,7 @@ function startMockSocks5Proxy(expectedAuth?: { user: string; pass: string }): Pr
   });
 }
 
-function connectWithHook(hook: ReturnType<typeof createProxyConnect>): Promise<string> {
+function connectWithHook(hook: ConnectHook): Promise<string> {
   return new Promise((resolve, reject) => {
     let sock: net.Socket | null = null;
     const fakeClient = {
@@ -201,6 +197,12 @@ function connectWithHook(hook: ReturnType<typeof createProxyConnect>): Promise<s
 }
 
 async function run() {
+  const { DATA_DIR } = await import("../server/src/config/paths");
+  const { createProxyConnect, redactProxySecrets, testProxyConnection } = await import("../server/src/modules/proxy/connect");
+  const { deleteProxySecret, hasProxySecret, readProxySecret, writeProxySecret } = await import("../server/src/modules/proxy/secrets");
+  const { parseProxyLine, ProxyStore } = await import("../server/src/modules/proxy/store");
+  const { initSecretBox, setSecretKeyForTests } = await import("../server/src/security/secretBox");
+
   await initSecretBox();
   setSecretKeyForTests(crypto.randomBytes(32));
 
