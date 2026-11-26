@@ -28,7 +28,7 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
   const [accountId, setAccountId] = useState("");
   const [count, setCount] = useState(1);
   const [serverId, setServerId] = useState(defaultSid);
-  const [proxyChoice, setProxyChoice] = useState("");
+  const [proxyChoice, setProxyChoice] = useState<string | null>(null);
   const [autostart, setAutostart] = useState(false);
   const [startNow, setStartNow] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -42,6 +42,13 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
 
   const selectedAccount = accounts.find((row) => row.id === accountId);
   const effectiveCount = auth === "microsoft" ? 1 : count;
+  const hasEnabledProxy = proxies.some((p) => p.enabled);
+  const effectiveProxyChoice =
+    proxyChoice !== null
+      ? proxyChoice
+      : effectiveCount > 1 && hasEnabledProxy
+        ? "__round_robin__"
+        : "";
   const effectiveUsername = auth === "microsoft" && selectedAccount?.username ? selectedAccount.username : username;
   const canSubmit =
     Boolean(effectiveUsername.trim()) &&
@@ -68,8 +75,8 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
         sid = profile.id;
       }
       if (effectiveCount > 1) {
-        const proxyRoundRobin = proxyChoice === "__round_robin__";
-        const proxyId = proxyRoundRobin ? undefined : proxyChoice || null;
+        const proxyRoundRobin = effectiveProxyChoice === "__round_robin__";
+        const proxyId = proxyRoundRobin ? undefined : effectiveProxyChoice || null;
         await api.post("/api/bots/bulk", { template: username, count: effectiveCount, serverId: sid, autostart, startNow, proxyId, proxyRoundRobin });
       } else {
         await api.post("/api/bots", {
@@ -79,7 +86,7 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
           startNow,
           auth,
           accountId: auth === "microsoft" ? accountId : null,
-          proxyId: proxyChoice === "__round_robin__" ? null : proxyChoice || null
+          proxyId: effectiveProxyChoice === "__round_robin__" ? null : effectiveProxyChoice || null
         });
       }
       applySnapshot(await api.get<StateSnapshot>("/api/state"));
@@ -262,7 +269,7 @@ export function AddBotModal({ onClose }: { onClose: () => void }) {
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-zinc-400">{t("proxies.label")}</span>
             <select
-              value={proxyChoice}
+              value={effectiveProxyChoice}
               onChange={(e) => setProxyChoice(e.target.value)}
               className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-zinc-100 outline-none focus:border-indigo-500"
             >
